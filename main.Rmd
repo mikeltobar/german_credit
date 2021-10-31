@@ -1,0 +1,306 @@
+---
+always_allow_html: true
+title: "german_credit"
+output:
+  github_document:
+    pandoc_args: --webtex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Intro
+
+In this work, we will focus on the generation and interpretation of a decision tree. For that process, we will use a dataset that gives information about credit admissions in Germany.
+
+### 1. Initial data analysis
+
+First, we will load the needed libraries.
+
+```{r, warning=F, message=F}
+library("ggplot2")
+library("miscset")
+library("Boruta")
+library("dplyr")
+library("e1071")
+library("caret")
+library("randomForest")
+library("rpart")
+```
+
+Next, let's see a little sample of the file.
+
+```{r }
+credit <-read.csv("credit_kaggle.csv", TRUE, ",", fileEncoding = "UTF-8")
+head(credit,10)
+```
+
+We try to look at the column composition looking for empty values and the numeric information of each column.
+
+```{r }
+summary(credit)
+str(credit)
+```
+
+From the preceding output, we can't see any NA value. We also can see a mix of numeric values with text values. 
+
+The dataset gives us a series of personal data of the clients, such as their age, job, worked years, civil status... Along with the data, there is a classifier on whether the client has gotten their credit approved or not. Thus, we can expect to create a model that, starting with some personal information can answer if a client's profile is eligible for a credit or not.
+
+Some variables will need to be binarized, as they give us info which is just true or false, and we will use "1"s or "0"s to do the job. 
+
+
+```{r }
+credit$default<-gsub(1,0,credit$default)
+credit$default<-gsub(2,1,credit$default)
+credit$dependents<-gsub(1,0,credit$dependents)
+credit$dependents<-gsub(2,1,credit$dependents)
+```
+
+## 2. Descriptive analysis
+
+It's interesting to do a visual analysis to see how is the data for each variable.
+
+```{r fig.height=10, fig.width=12}
+ggplotGrid(ncol = 4,
+  lapply(c("checking_balance", "credit_history", "purpose", "savings_balance", "employment_length", "personal_status", "other_debtors", "property", "installment_plan", "housing", "telephone", "foreign_worker", "job", "installment_rate","existing_credits", "residence_history"),
+    function(col) {
+        ggplot(credit, aes_string(col)) + geom_bar() + coord_flip()
+    }))
+```
+
+The "installment.rate" variable gives information about the payments made by the clients. A "4" value would be a client who misses many payments and has little reliability, whereas a "1" value would mean a client who pays the monthly fees without any issues.
+
+The "dependents" variable gives information on whether the individual has any close family members he/she has to take care of. "1" means he/she has dependents, "0" means no dependents.
+
+The "default" classifier gives information about the credit history, "1" being a good credit score and "0" meaning a bad one.
+
+We think there are some variables, specifically "foreign_worker", "other_debtors" or "installment_plan", that aren't very interesting for the analysis, as most of the data accumulate in one category. 
+
+Next, we will look at the cuantitative variables, such as "months_loan_duration", "amount" and "age".
+
+```{r }
+hist(credit$months_loan_duration,xlab="Credit length (months)", ylab="Clients", main="Clients according to credit duration (in months)")
+hist(credit$amount,xlab="Importe", ylab="Clients", main="Clients according to credit amount")
+hist(credit$age,xlab="Age", ylab="Clients", main="Clients by age")
+```
+
+Reading the data, we can see how the credit lengths are centered around 20-40 months, that the majority of credits are considered low-quantity and that the client age is centered around 25 and 30 years.
+
+We can make boxplots of each variable in order to study their extreme values.
+
+```{r }
+boxplot(credit$months_loan_duration, main="Credit duration (months)")
+boxplot(credit$amount, main="Amount of the credit given")
+boxplot(credit$age, main="Clients' age")
+```
+
+We can spot some outliers in the three boxplots, in the higher part of the distribution. However, we will consider them acceptable values, and won't remove them from the sample.
+
+It could be interesting to analyze the correlations between variables presented before. To do so, the "Boruta" method, a Random Forest algorithm that is able to analyze the importance of eacch variable seems interesting. To complete this method, we think the logistical regression is interesting to studdy all elements included in the dataset.
+
+```{r }
+cols <- c("checking_balance", "credit_history", "purpose", "savings_balance", "employment_length","personal_status","other_debtors","property","installment_plan","housing","default","telephone","foreign_worker","job")
+
+credit[,cols] <- lapply(credit[,cols],as.factor)
+
+
+credit$checking_balance <- factor(credit$checking_balance)
+glm.credit<- glm(default~., family=binomial, data=credit)
+summary(glm.credit)
+
+exp(coefficients(glm.credit))
+
+```
+
+From the analysis made before, we can classify variables in statistically significative or not. Criteria will be OR (Odds Ratio) and p-values. If a variable presents values higher than 1 in its OR attributes, it can be considered not significative. Talking about the p-value, we will work with a 95% confidence degree, which means that if it's higher than 0.05 the variable won't be considered significative. 
+
+```{r message=F, warning=F}
+fit <- Boruta(Species ~ ., data = iris, doTrace = 2);
+boruta.credit_train <- Boruta(default~., data = credit, doTrace = 2)
+```
+
+```{r }
+print(boruta.credit_train)
+
+par(mar=c(10,5,5,5)+.1)
+plot(boruta.credit_train, xlab= "", las=3)
+```
+
+The "Boruta" method gives us a sense of which are the most important variables in this analysis. We consider the 12 variables "Boruta" considers important are interesting for our work.
+
+The random forest "Boruta" runs has its reservations about 5 variables: however, its high p-values can make the case for their removal. We will therefore just work with our 12 variables.
+
+## 3. First decision tree
+
+First, we will clean the dataframe in order to get only the variables of interest.
+
+```{r }
+credit<-subset(credit, select=(c(1:6,8,10,12:14,16,17)))  
+```
+
+Then we will build a test and train model, using 2/3 of the data for the training set and 1/3 for the test set.  
+
+
+```{r }
+set.seed(1432)
+y <- credit[,13] 
+x <- credit[,1:12] 
+```
+
+We can now separate the data according to a parameter, with split_prop. We will also create a function that separes data in two groups.
+
+## 4. First decision tree and error 
+
+We can now analyze the generated decision tree, and the obtained rules.
+
+```{r fig.height=15, fig.width=18}
+split_prop <- 3
+max_split<-floor(nrow(x)/split_prop)
+tr_limit <- nrow(x)-max_split
+ts_limit <- nrow(x)-max_split+1
+
+trainx <- x[1:tr_limit,]
+trainy <- y[1:tr_limit]
+testx <- x[ts_limit+1:nrow(x),]
+testy <- y[ts_limit+1:nrow(x)]
+
+split_prop <- 3
+indexes = sample(1:nrow(credit), size=floor(((split_prop-1)/split_prop)*nrow(credit)))
+trainx<-x[indexes,]
+trainy<-y[indexes]
+testx<-x[-indexes,]
+testy<-y[-indexes]
+
+summary(testx)
+summary(testy)
+summary(trainx)
+summary(trainy)
+
+trainy = as.factor(trainy)
+model <- C50::C5.0(trainx, trainy,rules=TRUE )
+summary(model)
+
+model <- C50::C5.0(trainx, trainy)
+plot(model)
+```
+
+We get a 18% error rate, with an incorrect classification of 120 objets out of 666.
+
+## 5. Rules obtained
+
+In the tree, we get the following rules (a total of 10):
+
+* Rule 1: Checking_balance bigger than 200 DM or unknown, denied credit (87,5% confidence).
+
+* Rule 2: Checking_balance bigger than 1000 DM or unknown, denied credit (85,8% confidence).
+
+* Rule 3: Months_loan_duration lower or equal to 27 months, credit_history critical, delayed or repaid, denied credit (79,9%).
+
+* Rule 4: Checking_balance lower than 0 DM or between 1 and 200 DM, credit_history between critical and repaid, amount lower or equal to 1386, property equal to other, with existing credits, credit accepted (93,3%).
+
+* Rule 5: Checking_balance lower than 0 DM, credit_history delayed or repaid, savings balance equal or lower to 100 DM, existing_credits higher than 1, credit accepted (85,7%).
+
+* Rule 6: Checking_balance equal or lower than 0 DM, credit_history delayed and savings balance equal or lower than 100 DM, credit accepted (81,8%).
+
+* Rule 7: Checking_balance lower than 0 DM or between 1 and 200 DM, credit_history fully repaid or repaid this bank, savings_balance lower than 100 DM or between 101 y 500 DM, credit accepted (73,7%).
+
+* Rule 8: Checking_balance equal or lower than 0 DM, credit_history between delayed and repaid, savings_balance between lower than 100 DM o between 101 y 500 DM, other_debtors equal to none, and property equal to building society savings or unknown/none, credit accepted (71,1%).
+
+* Rule 9: Checking_balance lower than 0 DM and between 1 and 200 DM, months_loan_duration higher than 27, savings balance lower than 100 DM or between 101-500 DM, credit accepted (70,4%).
+
+* Rule 10: Checking_balance equal or lower to 0 DM, credit_history delayed or repaid, savings balance lower than 100 DM or between 101 and 500 DM, other debtors equal a none, crédito accepted (59,5%).
+
+## 6. Quality measure
+
+We will try to measure the model's quality from the test data initially saved.
+
+```{r }
+predicted_model <- predict( model, testx, type="class" )
+print(sprintf("The tree's precission is: %.4f %%",100*sum(predicted_model == testy) / length(predicted_model)))
+```
+
+The confusion matrix is the following.
+
+```{r }
+mat_conf<-table(testy,Predicted=predicted_model)
+mat_conf
+```
+
+We will interpret the result of the confusion matrix as follows.
+
+```{r }
+porcentaje_correct<-100 * sum(diag(mat_conf)) / sum(mat_conf)
+print(sprintf("The percentage of results correctly classified is: %.4f %%",porcentaje_correct))
+```
+
+If we install the gmodels package, we can get some more interesting information.
+
+```{r }
+if(!require(gmodels)){
+    install.packages('gmodels', repos='http://cran.us.r-project.org')
+    library(gmodels)
+}
+
+CrossTable(testy, predicted_model,prop.chisq  = FALSE, prop.c = FALSE, prop.r =FALSE,dnn = c('Reality', 'Prediction'))
+```
+
+## 7. Complementary models
+
+We have analyzed the most significative variables according to a classical decision tree. Now, we want to apply complementary models to our analysis.
+
+### 7.1 Random Forest
+
+Random Forest is an algorithm of supervised learning, which builds a "forest" of decision trees, from a training set.
+
+Next, we will show how this algorithm can apply to this dataset.
+
+```{r }
+modelo<-randomForest(default~., data=credit, proximity=T)
+library("randomForest")
+
+modelo<-randomForest(trainx, trainy, proximity=T)
+modelo
+
+predicted_model1 <- predict( modelo, testx, type="class" )
+print(sprintf("The Random Forest's accuracy is: %.4f %%",100*sum(predicted_model1 == testy) / length(predicted_model1)))
+
+mat_conf1<-table(testy,Predicted=predicted_model1)
+mat_conf1
+```
+
+We can note how the model has obtained an accuracy of 70,35%.
+
+### 7.2 Bayesian Model
+
+We will use a CART tree, which is a variation of the classical decision tree. It works as follows.
+
+```{r }
+modelo2<-naiveBayes(trainx, trainy, proximity=T)
+modelo2
+
+predicted_model2 <- predict( modelo2, testx, type="class" )
+print(sprintf("The Bayesian Model's accuracy is: %.4f %%",100*sum(predicted_model2 == testy) / length(predicted_model2)))
+
+mat_conf2<-table(testy,Predicted=predicted_model2)
+mat_conf2
+```
+
+Therefore, this model's accuracy is of 72.25%.
+
+## 8. Conclusions
+
+* The 3 models give a pretty similar accuracy, of between 70 and 72.5%. Thus, we can admit the models are fairly similar, but the best result is given to us by the C50 algorithm.
+
+* The most important variable according to the "Boruta" method is "checking_balance". There is a series of variables that aren't interesting for the analysis, and that are discarded, following Boruta's analysis and the logistical regression.
+
+* We obtain 10 rules, which are interesting to study the associations between the data and the obtention of a credit.
+
+### 9. Bibliography
+
+We get ideas for this analysis from the following links.
+
+* https://www.r-bloggers.com/2018/01/understanding-naive-bayes-classifier-using-r/
+
+* https://www.youtube.com/watch?v=6EXPYzbfLCE&t=786s
